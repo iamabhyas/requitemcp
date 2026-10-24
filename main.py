@@ -63,11 +63,11 @@ class EngagementEventsPage(BaseModel):
     events: list[dict[str, Any]]
 
 
-def _connect():
+def _connect(dbname: str):
     conn = psycopg.connect(
         host=ENGAGEMENT_DB__HOST,
         port=ENGAGEMENT_DB__PORT,
-        dbname=ENGAGEMENT_DB__NAME,
+        dbname=dbname,
         user=ENGAGEMENT_DB__USER,
         password=ENGAGEMENT_DB__PASSWORD,
         connect_timeout=15,
@@ -244,7 +244,7 @@ def fetch_engagement_events(
     """
     params.extend([limit + 1, offset])
 
-    with _connect() as conn:
+    with _connect(dbname=ENGAGEMENT_DB__NAME) as conn:
         with conn.cursor() as cur:
             cur.execute(query, params)
             rows = cur.fetchall()
