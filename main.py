@@ -152,4 +152,4 @@ async def get_engagement_events(
 
 
 if __name__ == "__main__":
-    mcp()
+    mcp.run(transport="http", host="0.0.0.0", port=8000)
