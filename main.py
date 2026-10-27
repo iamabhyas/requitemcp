@@ -363,121 +363,20 @@ def get_engagement_events(
     )
 
 
-class PassTemplatesPage(BaseModel):
-    """One page of active MasterPasstemplates rows."""
-
-    returned: int
-    limit: int
-    offset: int
-    has_more: bool
-    filters: dict[str, str]
-    templates: list[dict[str, Any]]
-
-
-def _like_contains(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
-
-
-def fetch_pass_templates(
-    master_pass_template_id: str | None = None,
-    type: str | None = None,
-    template_status: str | None = None,
-    template_purpose: str | None = None,
-    template_type: str | None = None,
-    name: str | None = None,
-    include_pass_data: bool | None = None,
-    limit: int = 20,
-    offset: int = 0,
-) -> PassTemplatesPage:
-    """Return active MasterPasstemplates rows, oldest id first."""
-    if limit < 1:
-        raise ValueError("limit must be at least 1")
-    if offset < 0:
-        raise ValueError("offset must be 0 or greater")
-    limit = min(limit, MAX_LIMIT)
-
-    filters: dict[str, str] = {}
-    conditions = ["is_deleted IS FALSE"]
-    params: list[object] = []
-
-    template_id = _blank_to_none(master_pass_template_id)
-    if template_id:
-        parsed_id = _parse_uuid(template_id, "master_pass_template_id")
-        conditions.append("master_pass_template_id = %s")
-        params.append(parsed_id)
-        filters["master_pass_template_id"] = parsed_id
-
-    def add_choice(column: str, value: str | None, allowed: tuple[str, ...]) -> None:
-        text = _blank_to_none(value)
-        if not text:
-            return
-        parsed = _require_choice(text, column, allowed)
-        conditions.append(f"{column} = %s")
-        params.append(parsed)
-        filters[column] = parsed
-
-    add_choice("type", type, PASS_TYPES)
-    add_choice("template_status", template_status, TEMPLATE_STATUSES)
-    add_choice("template_purpose", template_purpose, TEMPLATE_PURPOSES)
-    add_choice("template_type", template_type, TEMPLATE_TYPES)
-
-    name_text = _blank_to_none(name)
-    if name_text:
-        conditions.append("name ILIKE %s ESCAPE '\\'")
-        params.append(_like_contains(name_text))
-        filters["name"] = name_text
-
-    show_pass_data = (
-        "master_pass_template_id" in filters
-        if include_pass_data is None
-        else include_pass_data
-    )
-    columns = """
-        master_pass_template_id,
-        name,
-        type,
-        template_status,
-        template_purpose,
-        template_type,
-        is_deleted,
-        receipt_enabled,
-        mystery_box_enabled,
-        created_date,
-        modified_date,
-        deleted_date
-    """
-    if show_pass_data:
-        columns += ",\n        wallet_pass_data"
-
-    query = f"""
-        SELECT {columns}
-        FROM public."MasterPasstemplates"
-        WHERE {" AND ".join(conditions)}
-        ORDER BY master_pass_template_id ASC
-        LIMIT %s
-        OFFSET %s
-    """
-    params.extend([limit + 1, offset])
-
+def fetch_pass_templates() -> list[dict[str, Any]]:
+    """Return active rows from MasterPasstemplates."""
     with _connect(dbname=WALLET_DB__NAME) as conn:
         with conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(
+                """
+                SELECT *
+                FROM public."MasterPasstemplates"
+                WHERE is_deleted IS FALSE
+                ORDER BY master_pass_template_id ASC
+                """
+            )
             rows = cur.fetchall()
-
-    has_more = len(rows) > limit
-    templates = [_jsonable(row) for row in rows[:limit]]
-    if show_pass_data:
-        templates = [_redact(template) for template in templates]
-
-    return PassTemplatesPage(
-        returned=len(templates),
-        limit=limit,
-        offset=offset,
-        has_more=has_more,
-        filters=filters,
-        templates=templates,
-    )
+    return [_jsonable(row) for row in rows]
 
 
 @mcp.tool(
@@ -489,70 +388,9 @@ def fetch_pass_templates(
         openWorldHint=True,
     )
 )
-def get_pass_templates(
-    master_pass_template_id: Annotated[
-        str | None,
-        Field(description="One MasterPasstemplates row. UUID."),
-    ] = None,
-    type: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Wallet pass type: event_ticket, coupon, store_card, "
-                "boarding_pass, or generic."
-            )
-        ),
-    ] = None,
-    template_status: Annotated[
-        str | None,
-        Field(description="Template status: active, draft, or inactive."),
-    ] = None,
-    template_purpose: Annotated[
-        str | None,
-        Field(description="Exact template purpose, such as general_pass or QR_MEMBER."),
-    ] = None,
-    template_type: Annotated[
-        str | None,
-        Field(description="Exact template type, such as classic_voucher or qr_pass."),
-    ] = None,
-    name: Annotated[
-        str | None,
-        Field(description="Case-insensitive match against part of the template name."),
-    ] = None,
-    include_pass_data: Annotated[
-        bool | None,
-        Field(
-            description=(
-                "Include wallet_pass_data. Defaults to true for one "
-                "master_pass_template_id and false for lists."
-            )
-        ),
-    ] = None,
-    limit: Annotated[
-        int,
-        Field(description="Maximum rows to return. Capped at 100.", ge=1, le=MAX_LIMIT),
-    ] = 20,
-    offset: Annotated[
-        int,
-        Field(description="Number of matching rows to skip. Use with has_more.", ge=0),
-    ] = 0,
-) -> PassTemplatesPage:
-    """List active master pass templates.
-
-    Combine any filters. Pass data is omitted from lists unless include_pass_data
-    is true. Use a returned master_pass_template_id with create_wallet_template.
-    """
-    return fetch_pass_templates(
-        master_pass_template_id=master_pass_template_id,
-        type=type,
-        template_status=template_status,
-        template_purpose=template_purpose,
-        template_type=template_type,
-        name=name,
-        include_pass_data=include_pass_data,
-        limit=limit,
-        offset=offset,
-    )
+def get_pass_templates() -> list[dict[str, Any]]:
+    """Get all active pass templates."""
+    return fetch_pass_templates()
 
 
 PASS_TYPES = ("event_ticket", "coupon", "store_card", "boarding_pass", "generic")
@@ -585,7 +423,6 @@ class WalletTemplateCreated(BaseModel):
     community_passes_id: str
     community_id: str
     member_id: str | None
-    master_pass_template_id: str | None
     name: str
     type: str
     template_status: str
@@ -604,161 +441,40 @@ def _require_choice(value: str, field_name: str, allowed: tuple[str, ...]) -> st
     return text
 
 
-def _pick_text(
-    explicit: str | None,
-    source: dict[str, Any] | None,
-    column: str,
-    label: str,
-) -> str:
-    text = _blank_to_none(explicit)
-    if text:
-        return text
-    if source and source.get(column) not in (None, ""):
-        return str(source[column])
-    raise ValueError(f"{label} is required when master_pass_template_id is omitted")
-
-
-def _pick_bool(
-    explicit: bool | None,
-    source: dict[str, Any] | None,
-    column: str,
-) -> bool:
-    if explicit is not None:
-        return explicit
-    if source is not None and source.get(column) is not None:
-        return bool(source[column])
-    return False
-
-
-def _sync_pass_metadata(
-    data: dict[str, Any],
-    *,
-    name: str,
-    pass_type: str,
-    status: str,
-    purpose: str,
-    kind: str,
-) -> dict[str, Any]:
-    metadata = data.get("metadata")
-    if not isinstance(metadata, dict):
-        return data
-    updated = dict(metadata)
-    replacements = {
-        "template_name": name,
-        "type": pass_type,
-        "template_status": status,
-        "template_purpose": purpose,
-        "template_type": kind,
-    }
-    if all(updated.get(key) == value for key, value in replacements.items() if key in updated):
-        return data
-    for key, value in replacements.items():
-        if key in updated:
-            updated[key] = value
-    copied = dict(data)
-    copied["metadata"] = updated
-    return copied
-
-
-def _load_master_template(cur: Any, master_pass_template_id: str) -> dict[str, Any]:
-    cur.execute(
-        """
-        SELECT
-            master_pass_template_id,
-            name,
-            type,
-            wallet_pass_data,
-            template_status,
-            template_purpose,
-            template_type,
-            receipt_enabled,
-            mystery_box_enabled
-        FROM public."MasterPasstemplates"
-        WHERE master_pass_template_id = %s
-          AND is_deleted IS FALSE
-        """,
-        (master_pass_template_id,),
-    )
-    row = cur.fetchone()
-    if not row:
-        raise ValueError("master_pass_template_id was not found")
-    return row
-
-
 def create_wallet_template_record(
     community_id: str,
-    name: str | None = None,
-    type: str | None = None,
-    template_status: str | None = None,
-    template_purpose: str | None = None,
-    template_type: str | None = None,
+    name: str,
+    type: str,
+    template_status: str,
+    template_purpose: str,
+    template_type: str,
     wallet_pass_data: dict[str, Any] | None = None,
     member_id: str | None = None,
-    master_pass_template_id: str | None = None,
-    receipt_enabled: bool | None = None,
-    mystery_box_enabled: bool | None = None,
+    receipt_enabled: bool = False,
+    mystery_box_enabled: bool = False,
 ) -> WalletTemplateCreated:
-    """Insert one CommunityPasses wallet template."""
+    """Insert one active CommunityPasses wallet template."""
     community_uuid = _parse_uuid(community_id, "community_id")
+    template_name = _blank_to_none(name)
+    if not template_name:
+        raise ValueError("name is required")
+
+    pass_type = _require_choice(type, "type", PASS_TYPES)
+    status = _require_choice(template_status, "template_status", TEMPLATE_STATUSES)
+    purpose = _require_choice(template_purpose, "template_purpose", TEMPLATE_PURPOSES)
+    kind = _require_choice(template_type, "template_type", TEMPLATE_TYPES)
+
     member_text = _blank_to_none(member_id)
     member_uuid = _parse_uuid(member_text, "member_id") if member_text else None
-    master_text = _blank_to_none(master_pass_template_id)
-    master_uuid = (
-        _parse_uuid(master_text, "master_pass_template_id") if master_text else None
-    )
     if wallet_pass_data is not None and not isinstance(wallet_pass_data, dict):
         raise ValueError("wallet_pass_data must be a JSON object")
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     community_passes_id = str(uuid4())
+    pass_data = Json(wallet_pass_data) if wallet_pass_data else None
 
     with _connect(dbname=WALLET_DB__NAME) as conn:
         with conn.cursor() as cur:
-            source = _load_master_template(cur, master_uuid) if master_uuid else None
-            template_name = _pick_text(name, source, "name", "name")
-            pass_type = _require_choice(
-                _pick_text(type, source, "type", "type"),
-                "type",
-                PASS_TYPES,
-            )
-            status = _require_choice(
-                _pick_text(template_status, source, "template_status", "template_status"),
-                "template_status",
-                TEMPLATE_STATUSES,
-            )
-            purpose = _require_choice(
-                _pick_text(
-                    template_purpose,
-                    source,
-                    "template_purpose",
-                    "template_purpose",
-                ),
-                "template_purpose",
-                TEMPLATE_PURPOSES,
-            )
-            kind = _require_choice(
-                _pick_text(template_type, source, "template_type", "template_type"),
-                "template_type",
-                TEMPLATE_TYPES,
-            )
-            receipts = _pick_bool(receipt_enabled, source, "receipt_enabled")
-            mystery_box = _pick_bool(mystery_box_enabled, source, "mystery_box_enabled")
-
-            pass_body = wallet_pass_data
-            if pass_body is None and source is not None:
-                source_body = source.get("wallet_pass_data")
-                pass_body = dict(source_body) if isinstance(source_body, dict) else None
-            if isinstance(pass_body, dict):
-                pass_body = _sync_pass_metadata(
-                    pass_body,
-                    name=template_name,
-                    pass_type=pass_type,
-                    status=status,
-                    purpose=purpose,
-                    kind=kind,
-                )
-            pass_data = Json(pass_body) if pass_body else None
-
             cur.execute(
                 """
                 INSERT INTO public."CommunityPasses" (
@@ -805,8 +521,8 @@ def create_wallet_template_record(
                     status,
                     purpose,
                     kind,
-                    receipts,
-                    mystery_box,
+                    receipt_enabled,
+                    mystery_box_enabled,
                     now,
                     now,
                     None,
@@ -825,7 +541,6 @@ def create_wallet_template_record(
         community_passes_id=created["community_passes_id"],
         community_id=created["community_id"],
         member_id=created["member_id"],
-        master_pass_template_id=master_uuid,
         name=created["name"],
         type=created["type"],
         template_status=created["template_status"],
@@ -851,34 +566,22 @@ def create_wallet_template(
         str,
         Field(description="Community that owns the template. UUID."),
     ],
-    master_pass_template_id: Annotated[
-        str | None,
-        Field(
-            description=(
-                "MasterPasstemplates id to copy. Omitted fields and pass data "
-                "come from that row. UUID."
-            )
-        ),
-    ] = None,
-    name: Annotated[
-        str | None,
-        Field(description="Display name. Overrides the master template name."),
-    ] = None,
+    name: Annotated[str, Field(description="Display name of the wallet template.")],
     type: Annotated[
-        str | None,
+        str,
         Field(
             description=(
                 "Wallet pass type: event_ticket, coupon, store_card, "
                 "boarding_pass, or generic."
             )
         ),
-    ] = None,
+    ],
     template_status: Annotated[
-        str | None,
+        str,
         Field(description="Template status: active, draft, or inactive."),
-    ] = None,
+    ],
     template_purpose: Annotated[
-        str | None,
+        str,
         Field(
             description=(
                 "Template purpose, such as general_pass, paylink_pass, "
@@ -887,22 +590,22 @@ def create_wallet_template(
                 "QR_PAYMENT_PROFILE."
             )
         ),
-    ] = None,
+    ],
     template_type: Annotated[
-        str | None,
+        str,
         Field(
             description=(
                 "Template type: classic_voucher, classic_paylink, "
                 "classic_payment_profile, qr_pass, or loyalty_with_checkin."
             )
         ),
-    ] = None,
+    ],
     wallet_pass_data: Annotated[
         dict[str, Any] | None,
         Field(
             description=(
-                "Pass design JSON. Omit it to copy wallet_pass_data from "
-                "master_pass_template_id, or to store none."
+                "Pass design JSON stored on the template. "
+                "Omit it to store no pass data."
             )
         ),
     ] = None,
@@ -911,20 +614,18 @@ def create_wallet_template(
         Field(description="Member who created the template. UUID. Optional."),
     ] = None,
     receipt_enabled: Annotated[
-        bool | None,
-        Field(description="Overrides the master template receipt setting."),
-    ] = None,
+        bool,
+        Field(description="Whether receipts are enabled for this template."),
+    ] = False,
     mystery_box_enabled: Annotated[
-        bool | None,
-        Field(description="Overrides the master template mystery box setting."),
-    ] = None,
+        bool,
+        Field(description="Whether the mystery box is enabled for this template."),
+    ] = False,
 ) -> WalletTemplateCreated:
     """Create a community wallet pass template.
 
-    Copies a master template when master_pass_template_id is set, then applies
-    any overrides. Inserts a CommunityPasses row and does not change
-    MasterPasstemplates. Metadata inside the copied pass data is updated to
-    match the saved name, type, status, purpose, and template type.
+    Inserts a CommunityPasses row with is_deleted false and an empty
+    notification_workflow_filters object. This does not change MasterPasstemplates.
     """
     return create_wallet_template_record(
         community_id=community_id,
@@ -935,7 +636,6 @@ def create_wallet_template(
         template_type=template_type,
         wallet_pass_data=wallet_pass_data,
         member_id=member_id,
-        master_pass_template_id=master_pass_template_id,
         receipt_enabled=receipt_enabled,
         mystery_box_enabled=mystery_box_enabled,
     )
