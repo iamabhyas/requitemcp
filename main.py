@@ -4,13 +4,13 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from dotenv import load_dotenv
 from mcp_types import ToolAnnotations
 from psycopg.rows import dict_row
-from psycopg.types.json import set_json_loads
+from psycopg.types.json import Json, set_json_loads
 from pydantic import BaseModel, Field
 
 from fastmcp import FastMCP
@@ -391,6 +391,254 @@ def fetch_pass_templates() -> list[dict[str, Any]]:
 def get_pass_templates() -> list[dict[str, Any]]:
     """Get all active pass templates."""
     return fetch_pass_templates()
+
+
+PASS_TYPES = ("event_ticket", "coupon", "store_card", "boarding_pass", "generic")
+TEMPLATE_STATUSES = ("active", "draft", "inactive")
+TEMPLATE_PURPOSES = (
+    "general_pass",
+    "paylink_pass",
+    "dynamic_paylink_pass",
+    "payment_profile_pass",
+    "checkin_loyalty",
+    "QR_CHECKIN",
+    "QR_COMMUNITY",
+    "QR_KUDOS",
+    "QR_MEMBER",
+    "QR_PAYMENT_PROFILE",
+)
+TEMPLATE_TYPES = (
+    "classic_voucher",
+    "classic_paylink",
+    "classic_payment_profile",
+    "qr_pass",
+    "loyalty_with_checkin",
+)
+
+
+class WalletTemplateCreated(BaseModel):
+    """A CommunityPasses row created as a wallet template."""
+
+    detail: str
+    community_passes_id: str
+    community_id: str
+    member_id: str | None
+    name: str
+    type: str
+    template_status: str
+    template_purpose: str
+    template_type: str
+    receipt_enabled: bool
+    mystery_box_enabled: bool
+    created_date: str
+
+
+def _require_choice(value: str, field_name: str, allowed: tuple[str, ...]) -> str:
+    text = _blank_to_none(value)
+    if text not in allowed:
+        choices = ", ".join(allowed)
+        raise ValueError(f"{field_name} must be one of: {choices}")
+    return text
+
+
+def create_wallet_template_record(
+    community_id: str,
+    name: str,
+    type: str,
+    template_status: str,
+    template_purpose: str,
+    template_type: str,
+    wallet_pass_data: dict[str, Any] | None = None,
+    member_id: str | None = None,
+    receipt_enabled: bool = False,
+    mystery_box_enabled: bool = False,
+) -> WalletTemplateCreated:
+    """Insert one active CommunityPasses wallet template."""
+    community_uuid = _parse_uuid(community_id, "community_id")
+    template_name = _blank_to_none(name)
+    if not template_name:
+        raise ValueError("name is required")
+
+    pass_type = _require_choice(type, "type", PASS_TYPES)
+    status = _require_choice(template_status, "template_status", TEMPLATE_STATUSES)
+    purpose = _require_choice(template_purpose, "template_purpose", TEMPLATE_PURPOSES)
+    kind = _require_choice(template_type, "template_type", TEMPLATE_TYPES)
+
+    member_text = _blank_to_none(member_id)
+    member_uuid = _parse_uuid(member_text, "member_id") if member_text else None
+    if wallet_pass_data is not None and not isinstance(wallet_pass_data, dict):
+        raise ValueError("wallet_pass_data must be a JSON object")
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    community_passes_id = str(uuid4())
+    pass_data = Json(wallet_pass_data) if wallet_pass_data else None
+
+    with _connect(dbname=WALLET_DB__NAME) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public."CommunityPasses" (
+                    community_passes_id,
+                    community_id,
+                    member_id,
+                    name,
+                    type,
+                    wallet_pass_data,
+                    template_status,
+                    template_purpose,
+                    template_type,
+                    receipt_enabled,
+                    mystery_box_enabled,
+                    created_date,
+                    modified_date,
+                    deleted_date,
+                    is_deleted,
+                    notification_workflow_filters
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                RETURNING
+                    community_passes_id,
+                    community_id,
+                    member_id,
+                    name,
+                    type,
+                    template_status,
+                    template_purpose,
+                    template_type,
+                    receipt_enabled,
+                    mystery_box_enabled,
+                    created_date
+                """,
+                (
+                    community_passes_id,
+                    community_uuid,
+                    member_uuid,
+                    template_name,
+                    pass_type,
+                    pass_data,
+                    status,
+                    purpose,
+                    kind,
+                    receipt_enabled,
+                    mystery_box_enabled,
+                    now,
+                    now,
+                    None,
+                    False,
+                    Json({}),
+                ),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise RuntimeError("Wallet template creation failed")
+
+    created = _jsonable(row)
+    return WalletTemplateCreated(
+        detail="Wallet template created successfully",
+        community_passes_id=created["community_passes_id"],
+        community_id=created["community_id"],
+        member_id=created["member_id"],
+        name=created["name"],
+        type=created["type"],
+        template_status=created["template_status"],
+        template_purpose=created["template_purpose"],
+        template_type=created["template_type"],
+        receipt_enabled=created["receipt_enabled"],
+        mystery_box_enabled=created["mystery_box_enabled"],
+        created_date=created["created_date"],
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create wallet template",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
+def create_wallet_template(
+    community_id: Annotated[
+        str,
+        Field(description="Community that owns the template. UUID."),
+    ],
+    name: Annotated[str, Field(description="Display name of the wallet template.")],
+    type: Annotated[
+        str,
+        Field(
+            description=(
+                "Wallet pass type: event_ticket, coupon, store_card, "
+                "boarding_pass, or generic."
+            )
+        ),
+    ],
+    template_status: Annotated[
+        str,
+        Field(description="Template status: active, draft, or inactive."),
+    ],
+    template_purpose: Annotated[
+        str,
+        Field(
+            description=(
+                "Template purpose, such as general_pass, paylink_pass, "
+                "dynamic_paylink_pass, payment_profile_pass, checkin_loyalty, "
+                "QR_CHECKIN, QR_COMMUNITY, QR_KUDOS, QR_MEMBER, or "
+                "QR_PAYMENT_PROFILE."
+            )
+        ),
+    ],
+    template_type: Annotated[
+        str,
+        Field(
+            description=(
+                "Template type: classic_voucher, classic_paylink, "
+                "classic_payment_profile, qr_pass, or loyalty_with_checkin."
+            )
+        ),
+    ],
+    wallet_pass_data: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description=(
+                "Pass design JSON stored on the template. "
+                "Omit it to store no pass data."
+            )
+        ),
+    ] = None,
+    member_id: Annotated[
+        str | None,
+        Field(description="Member who created the template. UUID. Optional."),
+    ] = None,
+    receipt_enabled: Annotated[
+        bool,
+        Field(description="Whether receipts are enabled for this template."),
+    ] = False,
+    mystery_box_enabled: Annotated[
+        bool,
+        Field(description="Whether the mystery box is enabled for this template."),
+    ] = False,
+) -> WalletTemplateCreated:
+    """Create a community wallet pass template.
+
+    Inserts a CommunityPasses row with is_deleted false and an empty
+    notification_workflow_filters object. This does not change MasterPasstemplates.
+    """
+    return create_wallet_template_record(
+        community_id=community_id,
+        name=name,
+        type=type,
+        template_status=template_status,
+        template_purpose=template_purpose,
+        template_type=template_type,
+        wallet_pass_data=wallet_pass_data,
+        member_id=member_id,
+        receipt_enabled=receipt_enabled,
+        mystery_box_enabled=mystery_box_enabled,
+    )
 
 
 if __name__ == "__main__":
