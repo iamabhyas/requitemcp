@@ -32,6 +32,9 @@ ENGAGEMENT_DB__PORT = int(_required_env("ENGAGEMENT_DB__PORT"))
 ENGAGEMENT_DB__NAME = _required_env("ENGAGEMENT_DB__NAME")
 ENGAGEMENT_DB__USER = _required_env("ENGAGEMENT_DB__USER")
 ENGAGEMENT_DB__PASSWORD = _required_env("ENGAGEMENT_DB__PASSWORD")
+TRANSACTION_DB__NAME = _required_env("TRANSACTION_DB__NAME")
+WALLET_DB__NAME = _required_env("WALLET_DB__NAME")
+USER_DB__NAME = _required_env("USER_DB__NAME")
 
 MAX_LIMIT = 100
 DETAIL_FIELDS = ("payload", "metadata", "header")
@@ -360,6 +363,35 @@ def get_engagement_events(
     )
 
 
+def fetch_pass_templates() -> list[dict[str, Any]]:
+    """Return active rows from MasterPasstemplates."""
+    with _connect(dbname=WALLET_DB__NAME) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM public."MasterPasstemplates"
+                WHERE is_deleted IS FALSE
+                ORDER BY master_pass_template_id ASC
+                """
+            )
+            rows = cur.fetchall()
+    return [_jsonable(row) for row in rows]
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get pass templates",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+def get_pass_templates() -> list[dict[str, Any]]:
+    """Get all active pass templates."""
+    return fetch_pass_templates()
+
 
 if __name__ == "__main__":
-    mcp.run(transport="http", host="0.0.0.0", port=8000)
+    mcp.run(transport="http", host="0.0.0.0", port=8001)
